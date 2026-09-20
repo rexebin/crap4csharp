@@ -7,7 +7,7 @@ using System.Diagnostics;
 // "type!=IntegrationTests"` and observes WHICH methods actually execute -- empirically proving the VSTest
 // exclusion-form semantics departure #10 depends on: an UNTAGGED test RUNS (an absent `type` property satisfies
 // `!=` any value) while a [Trait("type","IntegrationTests")] test is EXCLUDED. The fixture is an isolated,
-// minimal net8.0 xUnit project built in a temp dir OUTSIDE the repo (no Directory.Build.props / analyzer /
+// minimal net10.0 xUnit project built in a temp dir OUTSIDE the repo (no Directory.Build.props / analyzer /
 // warnings-as-errors inheritance) with its OWN nuget.config clearing sources to nuget.org-only, and package
 // versions pinned to those the solution already restored (xunit 2.5.3, xunit.runner.visualstudio 2.5.3,
 // Microsoft.NET.Test.Sdk 17.8.0) so restore hits the WARM cache -- no network. Each fixture [Fact] writes an
@@ -25,7 +25,7 @@ public class CoverageFilterBehaviorTests
     private const string FixtureProject = """
         <Project Sdk="Microsoft.NET.Sdk">
           <PropertyGroup>
-            <TargetFramework>net8.0</TargetFramework>
+            <TargetFramework>net10.0</TargetFramework>
             <Nullable>disable</Nullable>
             <ImplicitUsings>disable</ImplicitUsings>
             <IsPackable>false</IsPackable>

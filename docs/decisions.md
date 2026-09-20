@@ -30,7 +30,7 @@ node set below (an approved departure), so absolute CRAP scores are not numerica
 |---|---|---|
 | Analysis target | C# projects | Roslyn + Coverlet/Cobertura + `dotnet test` |
 | Namespace | `Microsoft.Crap4CSharp` | `AssemblyName`/`RootNamespace` = `Microsoft.<Project>` |
-| TFM | `net8.0` | SDKs 8/9/10 present; .NET 10 offers no conversion benefit |
+| TFM | `net10.0` | **SUPERSEDED at T31** — bumped from `net8.0`; see the **T31 register** |
 | Parser | Roslyn (`Microsoft.CodeAnalysis.CSharp`) | analog of the JDK compiler tree API |
 | Coverage | Coverlet → **Cobertura** (line counters) | JaCoCo `INSTRUCTION` has no exact analog — absolute numbers differ, algorithm identical |
 | Test framework | **xUnit** | + `Microsoft.NET.Test.Sdk`, `coverlet.collector` |
@@ -1440,3 +1440,48 @@ test after #10.
   warnings-as-errors in Release; `global.json`; `nuget.config` (nuget.org only); the agentic loop
   files; `meta-design` + feature template; `retrospective` + `build-test` skills.
 - **New:** GitHub Actions CI (nucleus used Azure DevOps).
+
+## T31 register — .NET 8 → .NET 10 target-framework bump (`vibe/dotnet10-upgrade`)
+
+Resolved decisions from the mechanical TFM retarget. **Supersedes** the original "TFM" locked choice
+(`net8.0`; "SDKs 8/9/10 present; .NET 10 offers no conversion benefit"). **No new departure number** —
+this is a build/tooling change, not a behavioral one; the CRAP algorithm, CLI contract, and analysis
+semantics are unchanged.
+
+- **D-T31a — trigger: the dev machine only has the .NET 10 SDK installed.** The prior locked choice
+  assumed SDKs 8/9/10 were all present locally; that ceased to hold (`dotnet --list-sdks` → `10.0.400`
+  only). Rather than requiring a machine-specific SDK 8 install to keep building this repo, `TargetFramework`
+  is bumped to `net10.0` in **both** `src/Crap4CSharp/Crap4CSharp.csproj` and
+  `tests/Crap4CSharp.Tests/Crap4CSharp.Tests.csproj`, and `global.json`'s `sdk.version` is bumped from
+  `8.0.406` to the installed `10.0.400` (`rollForward` **kept** at `latestFeature`, not widened to
+  `latestMajor` — the original policy's intent, pin-to-a-feature-band-with-forward-roll-within-it, is
+  preserved verbatim at the new major version, not loosened as a workaround).
+- **D-T31b — package versions held, not bulk-bumped.** `Microsoft.CodeAnalysis.CSharp` (4.14.0),
+  `Microsoft.CodeAnalysis.NetAnalyzers` (9.0.0), `StyleCop.Analyzers` (1.2.0-beta.556),
+  `Microsoft.CodeAnalysis.BannedApiAnalyzers` (3.3.4), `Microsoft.NET.Test.Sdk` (17.8.0), `xunit`
+  (2.5.3), `xunit.runner.visualstudio` (2.5.3), `xunit.analyzers` (1.15.0), `FluentAssertions` (kept
+  pinned `[7.0.0,8.0.0)` — the Apache-2.0 license pin is unaffected by the TFM bump and was **not**
+  touched), `FluentAssertions.Analyzers` (0.34.1), `coverlet.collector` (6.0.0) all build and run clean
+  on `net10.0` at their existing pinned versions; `dotnet list package --outdated` shows newer majors
+  exist for several of these (e.g. `Microsoft.CodeAnalysis.NetAnalyzers` 10.0.401,
+  `Microsoft.NET.Test.Sdk` 18.10.1) but bumping analyzer/test-SDK majors is a separate, higher-risk
+  change (new analyzer rule surfaces, breaking test-SDK changes) out of scope for a mechanical TFM
+  retarget — deferred, not required here.
+- **D-T31c — both `packages.lock.json` files regenerated via `dotnet restore --force-evaluate`,** not
+  hand-edited and not left to drift as a side effect of an unrelated restore. `RestorePackagesWithLockFile`
+  (Common.targets) still governs both.
+- **D-T31d — the `CoverageFilterBehaviorTests` fixture template was also net8.0-pinned and needed the
+  same bump.** The real-`dotnet test`-spawning fixture project embedded as a C# string literal in
+  `tests/Crap4CSharp.Tests/CoverageFilterBehaviorTests.cs` (`FixtureProject` constant, isolated in a temp
+  dir outside the repo) hardcoded `<TargetFramework>net8.0</TargetFramework>`; this is invisible to a
+  `.csproj`-only grep for the TFM but broke the test at run time (`testhost` for net8.0 has no matching
+  runtime once only the net10 runtime is installed: "You must install or update .NET to run this
+  application"). Bumped to `net10.0` alongside its package versions (already Test.Sdk
+  17.8.0/xunit 2.5.3/xunit.runner.visualstudio 2.5.3, held per D-T31b — those install fine on net10). Full
+  suite is 216/216 green after this fix; it was the only failure the retarget surfaced.
+- **Verification:** `dotnet build crap4csharp.sln --configuration Release` — 0 errors, 0 warnings
+  (warnings-as-errors/`AnalysisLevel=latest-all` clean, no new net10-analyzer warnings surfaced).
+  `dotnet test` — 216/216 passed. CLI smoke-tested end-to-end against a real external target
+  (`/Users/rex/dev/uml-viewer-dotnet/src/UmlViewer.Core`, explicit `.cs` file list, run from that repo's
+  own directory so `OwningProjectResolver`'s bounded upward search finds its `.csproj`) — real coverage
+  run completed, report printed, exit 0.

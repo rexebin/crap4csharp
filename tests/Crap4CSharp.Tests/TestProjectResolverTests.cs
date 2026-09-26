@@ -2,7 +2,9 @@ namespace Microsoft.Crap4CSharp.Tests;
 
 using System.Linq;
 
-// Covers TestProjectResolver (Model B, departure #9): the <Project>.Tests / <Project>.UnitTests naming gate,
+// Covers TestProjectResolver (Model B, departure #9; tiered discovery, departure #16): the <Project>.Tests /
+// <Project>.UnitTests tier, marker-based discovery (IsTestProject / Microsoft.NET.Test.Sdk via csproj,
+// Directory.Build.*, and <Import>s) with the <Project>.* prefix tier and ambiguity reporting,
 // transitive ProjectReference reachability (cycle-safe), the bin/obj + bounded-scope exclusions, ordinal-first
 // tie-break, backslash/`..` Include normalization, the non-throwing missing-reference discipline, and (D-T29a)
 // the two-stage MSBuild-property evaluation that expands `$(...)` tokens in ProjectReference Includes before
@@ -19,9 +21,9 @@ public class TestProjectResolverTests
             string test = WriteProject(
                 SubDir(root, "tests", "Foo.Tests"), "Foo.Tests", @"..\..\src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -34,9 +36,9 @@ public class TestProjectResolverTests
             string test = WriteProject(
                 SubDir(root, "tests", "Foo.UnitTests"), "Foo.UnitTests", @"..\..\src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -51,9 +53,9 @@ public class TestProjectResolverTests
             string test = WriteProject(
                 SubDir(root, "tests", "Foo.Tests"), "Foo.Tests", @"..\..\src\Bar\Bar.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -65,16 +67,17 @@ public class TestProjectResolverTests
             string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
             WriteProject(SubDir(root, "tests", "Foo.Tests"), "Foo.Tests");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
     [Fact]
     public void IgnoresReferencingProjectWithWrongName()
     {
-        // Refs Foo, but the name (Foo.IntegrationTests) matches neither .Tests nor .UnitTests -> name gate.
+        // Refs Foo, but the name (Foo.IntegrationTests) is not tier 1 and the project carries no test marker,
+        // so tiers 2/3 skip it too.
         WithTempRoot(root =>
         {
             string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
@@ -83,9 +86,9 @@ public class TestProjectResolverTests
                 "Foo.IntegrationTests",
                 @"..\..\src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
@@ -101,9 +104,9 @@ public class TestProjectResolverTests
             WriteProject(SubDir(root, "b"), "B", @"..\a\A.csproj");
             WriteProject(SubDir(root, "tests", "Foo.Tests"), "Foo.Tests", @"..\..\a\A.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
@@ -118,9 +121,9 @@ public class TestProjectResolverTests
             WriteProject(
                 SubDir(outer, "Foo.Tests"), "Foo.Tests", @"..\inner\src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, invocationRoot);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, invocationRoot);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
@@ -134,9 +137,9 @@ public class TestProjectResolverTests
             WriteProject(
                 SubDir(root, "obj", "Foo.Tests"), "Foo.Tests", @"..\..\src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
@@ -151,12 +154,12 @@ public class TestProjectResolverTests
             string unitTests = WriteProject(
                 SubDir(root, "tests", "Foo.UnitTests"), "Foo.UnitTests", @"..\..\src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
             string expected = new[] { tests, unitTests }
                 .OrderBy(p => p, StringComparer.Ordinal)
                 .First();
-            result.Should().Be(expected);
+            result.TestProject.Should().Be(expected);
         });
     }
 
@@ -171,9 +174,9 @@ public class TestProjectResolverTests
                 "Foo.Tests",
                 @"..\..\..\src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -190,9 +193,9 @@ public class TestProjectResolverTests
                 "Foo.Tests",
                 @"..\..\src\Missing\Missing.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
@@ -214,9 +217,9 @@ public class TestProjectResolverTests
                 Path.Combine(SubDir(root, "tests", "Foo.UnitTests"), "Foo.UnitTests.csproj"),
                 "<Project><ItemGroup>");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(valid);
+            result.TestProject.Should().Be(valid);
         });
     }
 
@@ -254,9 +257,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(RepoRoot)src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -275,9 +278,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(MSBuildThisFileDirectory)..\..\src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -294,9 +297,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(MSBuildProjectDirectory)\..\..\src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -315,9 +318,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(MSBuildProjectDirectory)..\..\src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
@@ -337,9 +340,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(reporoot)src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -359,9 +362,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(SrcRoot)\$(Proj)\$(Proj).csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -385,9 +388,9 @@ public class TestProjectResolverTests
                 bodyProps,
                 @"$(OwnerDir)\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -413,9 +416,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(OwnerDir)\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -437,9 +440,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(RepoRoot)src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
@@ -461,9 +464,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(RepoRoot)src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -488,9 +491,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(RepoRoot)src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
@@ -515,9 +518,9 @@ public class TestProjectResolverTests
                     string.Empty,
                     @"$(RepoRoot)src\Foo\Foo.csproj");
 
-                string? result = TestProjectResolver.ResolveTestProject(owning, root);
+                TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-                result.Should().BeNull($"condition {condition} is not a self-emptiness guard");
+                result.TestProject.Should().BeNull($"condition {condition} is not a self-emptiness guard");
             });
         }
     }
@@ -537,9 +540,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(A)src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
@@ -557,9 +560,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(Loop)src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
@@ -580,9 +583,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(FooDir)\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -600,9 +603,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(SolutionDir)src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().BeNull();
+            result.TestProject.Should().BeNull();
         });
     }
 
@@ -621,9 +624,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(SolutionDir)src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -646,9 +649,9 @@ public class TestProjectResolverTests
                 string.Empty,
                 @"$(RepoRoot)src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
     }
 
@@ -679,10 +682,277 @@ public class TestProjectResolverTests
                 @"$(RepoRoot)src\A\A.csproj",
                 @"$(RepoRoot)src\Foo\Foo.csproj");
 
-            string? result = TestProjectResolver.ResolveTestProject(owning, root);
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
 
-            result.Should().Be(test);
+            result.TestProject.Should().Be(test);
         });
+    }
+
+    // ---- Test-project auto-discovery (tiers 2/3 beyond the .Tests/.UnitTests naming convention) ----
+    [Fact]
+    public void DiscoversUnconventionallyNamedProjectMarkedIsTestProject()
+    {
+        WithTempRoot(root =>
+        {
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            string test = WriteRawProject(
+                SubDir(root, "tests", "Acceptance"), "Acceptance", IsTestProjectGroup + FooReference);
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().Be(test);
+        });
+    }
+
+    [Fact]
+    public void DiscoversProjectReferencingTestSdkPackage()
+    {
+        WithTempRoot(root =>
+        {
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            string test = WriteRawProject(
+                SubDir(root, "tests", "Specs"), "Specs", TestSdkItemGroup + FooReference);
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().Be(test);
+        });
+    }
+
+    [Fact]
+    public void DiscoversMarkerFromExplicitlyImportedFile()
+    {
+        // Mirrors crap4csharp's own layout: the test .csproj carries no marker itself; it imports a shared
+        // .targets file that sets IsTestProject.
+        WithTempRoot(root =>
+        {
+            File.WriteAllText(Path.Combine(root, "Tests.Common.targets"), $"<Project>{IsTestProjectGroup}</Project>");
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            string test = WriteRawProject(
+                SubDir(root, "tests", "BlackBox"),
+                "BlackBox",
+                FooReference + @"<Import Project=""..\..\Tests.Common.targets"" />");
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().Be(test);
+        });
+    }
+
+    [Fact]
+    public void DiscoversMarkerFromImportUsingThisFileDirectoryOfImportingFile()
+    {
+        // tests/Directory.Build.props imports $(MSBuildThisFileDirectory)shared/Test.props -- the token must
+        // resolve against the PROPS file's directory (tests/), not the project's.
+        WithTempRoot(root =>
+        {
+            string testsDir = SubDir(root, "tests");
+            File.WriteAllText(
+                Path.Combine(SubDir(testsDir, "shared"), "Test.props"), $"<Project>{TestSdkItemGroup}</Project>");
+            File.WriteAllText(
+                Path.Combine(testsDir, "Directory.Build.props"),
+                @"<Project><Import Project=""$(MSBuildThisFileDirectory)shared\Test.props"" /></Project>");
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            string test = WriteRawProject(SubDir(testsDir, "Scenarios"), "Scenarios", FooReference);
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().Be(test);
+        });
+    }
+
+    [Fact]
+    public void DiscoversMarkerFromDirectoryBuildProps()
+    {
+        WithTempRoot(root =>
+        {
+            WriteDirectoryBuildProps(SubDir(root, "tests"), IsTestProjectGroup);
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            string test = WriteRawProject(SubDir(root, "tests", "Scenarios"), "Scenarios", FooReference);
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().Be(test);
+        });
+    }
+
+    [Fact]
+    public void DiscoversMarkerFromDirectoryBuildTargets()
+    {
+        WithTempRoot(root =>
+        {
+            File.WriteAllText(
+                Path.Combine(SubDir(root, "tests"), "Directory.Build.targets"), $"<Project>{TestSdkItemGroup}</Project>");
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            string test = WriteRawProject(SubDir(root, "tests", "Scenarios"), "Scenarios", FooReference);
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().Be(test);
+        });
+    }
+
+    [Fact]
+    public void IgnoresReferencingProjectWithoutTestMarker()
+    {
+        // An app/host project that references Foo is not a test project.
+        WithTempRoot(root =>
+        {
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            WriteRawProject(SubDir(root, "src", "Foo.Api"), "Foo.Api", FooReferenceFromSrc);
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().BeNull();
+            result.AmbiguousCandidates.Should().BeEmpty();
+        });
+    }
+
+    [Fact]
+    public void IgnoresConditionedMarker()
+    {
+        // A conditioned marker cannot be evaluated statically -> not honored (fail-safe).
+        WithTempRoot(root =>
+        {
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            const string conditionedMarker =
+                @"<PropertyGroup Condition=""'$(CI)'=='true'""><IsTestProject>true</IsTestProject></PropertyGroup>";
+            WriteRawProject(SubDir(root, "tests", "Specs"), "Specs", conditionedMarker + FooReference);
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().BeNull();
+        });
+    }
+
+    [Fact]
+    public void IgnoresImportedFileAboveInvocationRoot()
+    {
+        WithTempRoot(outer =>
+        {
+            string root = SubDir(outer, "repo");
+            File.WriteAllText(Path.Combine(outer, "Outside.targets"), $"<Project>{IsTestProjectGroup}</Project>");
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            WriteRawProject(
+                SubDir(root, "tests", "Specs"),
+                "Specs",
+                FooReference + @"<Import Project=""..\..\..\Outside.targets"" />");
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().BeNull();
+        });
+    }
+
+    [Fact]
+    public void TerminatesOnImportCycleAndStillFindsMarker()
+    {
+        // A.targets <-> B.targets import each other; B carries the marker. The walk must terminate.
+        WithTempRoot(root =>
+        {
+            File.WriteAllText(
+                Path.Combine(root, "A.targets"), @"<Project><Import Project=""B.targets"" /></Project>");
+            File.WriteAllText(
+                Path.Combine(root, "B.targets"),
+                $@"<Project><Import Project=""A.targets"" />{IsTestProjectGroup}</Project>");
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            string test = WriteRawProject(
+                SubDir(root, "tests", "Specs"), "Specs", FooReference + @"<Import Project=""..\..\A.targets"" />");
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().Be(test);
+        });
+    }
+
+    [Fact]
+    public void PrefersNamingConventionOverDiscoveredTestProject()
+    {
+        WithTempRoot(root =>
+        {
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            WriteRawProject(SubDir(root, "tests", "Foo.BlackBoxTests"), "Foo.BlackBoxTests", IsTestProjectGroup + FooReference);
+            string conventional = WriteProject(
+                SubDir(root, "tests", "Foo.Tests"), "Foo.Tests", @"..\..\src\Foo\Foo.csproj");
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().Be(conventional);
+        });
+    }
+
+    [Fact]
+    public void PrefersProjectNamePrefixOverOtherTestProjects()
+    {
+        WithTempRoot(root =>
+        {
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            WriteRawProject(SubDir(root, "tests", "Acceptance"), "Acceptance", IsTestProjectGroup + FooReference);
+            string prefixed = WriteRawProject(
+                SubDir(root, "tests", "Foo.BlackBoxTests"), "Foo.BlackBoxTests", IsTestProjectGroup + FooReference);
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().Be(prefixed);
+        });
+    }
+
+    [Fact]
+    public void ReportsAmbiguityWhenMultiplePrefixedTestProjectsQualify()
+    {
+        WithTempRoot(root =>
+        {
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            string specs = WriteRawProject(
+                SubDir(root, "tests", "Foo.Specs"), "Foo.Specs", IsTestProjectGroup + FooReference);
+            string blackBox = WriteRawProject(
+                SubDir(root, "tests", "Foo.BlackBoxTests"), "Foo.BlackBoxTests", IsTestProjectGroup + FooReference);
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().BeNull();
+            result.AmbiguousCandidates.Should().Equal(
+                new[] { specs, blackBox }.OrderBy(p => p, StringComparer.Ordinal));
+        });
+    }
+
+    [Fact]
+    public void ReportsAmbiguityWhenMultipleUnprefixedTestProjectsQualify()
+    {
+        WithTempRoot(root =>
+        {
+            string owning = WriteProject(SubDir(root, "src", "Foo"), "Foo");
+            string acceptance = WriteRawProject(
+                SubDir(root, "tests", "Acceptance"), "Acceptance", IsTestProjectGroup + FooReference);
+            string scenarios = WriteRawProject(
+                SubDir(root, "tests", "Scenarios"), "Scenarios", TestSdkItemGroup + FooReference);
+
+            TestProjectResolution result = TestProjectResolver.ResolveTestProject(owning, root);
+
+            result.TestProject.Should().BeNull();
+            result.AmbiguousCandidates.Should().Equal(
+                new[] { acceptance, scenarios }.OrderBy(p => p, StringComparer.Ordinal));
+        });
+    }
+
+    private const string IsTestProjectGroup = "<PropertyGroup><IsTestProject>true</IsTestProject></PropertyGroup>";
+
+    private const string TestSdkItemGroup =
+        @"<ItemGroup><PackageReference Include=""Microsoft.NET.Test.Sdk"" Version=""17.8.0"" /></ItemGroup>";
+
+    // From tests/<Name>/ to src/Foo/Foo.csproj.
+    private const string FooReference = @"<ItemGroup><ProjectReference Include=""..\..\src\Foo\Foo.csproj"" /></ItemGroup>";
+
+    // From src/<Name>/ to src/Foo/Foo.csproj.
+    private const string FooReferenceFromSrc = @"<ItemGroup><ProjectReference Include=""..\Foo\Foo.csproj"" /></ItemGroup>";
+
+    // Emits <name>.csproj in dir with the given raw inner XML. Returns the absolute .csproj path.
+    private static string WriteRawProject(string dir, string name, string innerXml)
+    {
+        Directory.CreateDirectory(dir);
+        string path = Path.Combine(dir, name + ".csproj");
+        File.WriteAllText(path, $"<Project Sdk=\"Microsoft.NET.Sdk\">{innerXml}</Project>");
+        return path;
     }
 
     private static void WithTempRoot(Action<string> test)

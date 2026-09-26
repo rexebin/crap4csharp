@@ -1386,6 +1386,29 @@ false-fail. No exit-table row (D-T14a) moves; the frozen `TypeName#method#basena
     See the **T30 register** (D-T30a–d). (Ruled by Mr. Das: FIX via option (vi) — same-line-accessor
     0%-promotion WITH the type-present guard INCLUDED.)
 
+16. **Test-project auto-discovery (amends departure #9 stage (ii); C#-ecosystem)** — the
+    `.Tests`/`.UnitTests` naming convention is **no longer required** for a target to be analyzable. Among
+    the `.csproj` files under the invocation root (bin/obj excluded, #5) whose `ProjectReference`s
+    transitively include the owning project, `TestProjectResolver` picks by **tier**: **(1)**
+    `<Project>.Tests`/`<Project>.UnitTests` — no marker required, ordinal-first on a tie (the prior #9
+    behavior, unchanged); **(2)** *marked* test projects named `<Project>.*` (e.g. `Foo.BlackBoxTests`,
+    `Foo.Specs`); **(3)** any *marked* test project. The first non-empty tier wins; **>1 candidate at tier
+    2 or 3 fail-fasts** with anchor **`Multiple test projects`** (exit 1, before any coverage run, listing
+    the ordinal-sorted candidates) — never a guess. **Marked** = an **unconditioned**
+    `<IsTestProject>true</IsTestProject>` or `<PackageReference Include="Microsoft.NET.Test.Sdk">` found
+    in the `.csproj`, its bounded `Directory.Build.props`/`Directory.Build.targets` chain, or any file
+    those `<Import>` (recursive, cycle-safe, bounded to the invocation root, `$(...)` expanded over the
+    D-T29a property map with `MSBuildThisFile*` re-scoped to the importing file). Conditioned markers are
+    ignored (fail-safe); an `<Import>`'s own Condition is not evaluated — it is followed iff the expanded
+    path exists. **Motivation:** blackbox-first repos (in-process hosts such as `WebApplicationFactory`,
+    or driving the entry point) rarely use the `.Tests` name; in-process blackbox tests produce Coverlet
+    coverage exactly like unit tests. **Unchanged:** one owning project per run (#7/#9 span fail-fast),
+    one test project per run, and departure **#10**'s `type!=IntegrationTests` filter (Gherkin/E2E suites
+    tagged `IntegrationTests` stay excluded; untagged blackbox tests run). **Out of scope:** apps the tests
+    launch out-of-process (Coverlet's collector cannot see them), a `--test-project` override. See the
+    **T32 register**. (Ruled by Mr. Das: option A — convention first, then discovery; name-prefix tier;
+    keep #10.)
+
 ## Cyclomatic complexity — authoritative node set
 
 Base `CC = 1`. Walk the method `Body`/`ExpressionBody`; **descend into lambdas + local functions**;
@@ -1485,3 +1508,18 @@ semantics are unchanged.
   (`/Users/rex/dev/uml-viewer-dotnet/src/UmlViewer.Core`, explicit `.cs` file list, run from that repo's
   own directory so `OwningProjectResolver`'s bounded upward search finds its `.csproj`) — real coverage
   run completed, report printed, exit 0.
+
+## T32 register — test-project auto-discovery; adds departure #16 (`vibe/test-project-auto-discovery`)
+
+- **D-T32a — result record, not a nullable path.** `ResolveTestProject` returns
+  `TestProjectResolution(string? TestProject, IReadOnlyList<string> AmbiguousCandidates)` (same shape
+  as `OwningProjectResolution`) so `CliApplication.Execute` can distinguish *none* (`No test project`)
+  from *ambiguous* (`Multiple test projects`), and owns both exits (D-T14a).
+- **D-T32b — reference filter now runs before the name filter.** Every non-bin/obj `.csproj` under the
+  root is checked for transitive reachability (memoized per call), then tiered. Marker evaluation runs
+  only on reachable candidates and only when tier 1 is empty, so repos already on the convention pay no
+  marker cost.
+- **D-T32c — tier 1 keeps ordinal-first; tiers 2/3 fail-fast.** Preserves the exact pre-#16 behavior
+  (and `PicksOrdinalFirstWhenMultipleQualify`) for convention-named repos; discovery, being heuristic,
+  never guesses between candidates.
+- **Verification:** `dotnet test` — 232/232 passed, 0 warnings.

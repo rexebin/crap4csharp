@@ -4,16 +4,23 @@ using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
 
-// Model B (departure #9) test-project resolver: given an owning project (.csproj), find the test project that
-// exercises it, following the naming convention <Project>.Tests.csproj OR <Project>.UnitTests.csproj whose
-// ProjectReferences TRANSITIVELY include the owning project. Has no Java counterpart (crap4java ran ALL of a
-// resolved Maven module's tests); this is the C#-ecosystem adaptation that lets `dotnet test <TestProject>`
-// run the one test project for the analyzed code unit.
+// Outcome of TestProjectResolver.ResolveTestProject: the ONE resolved test project, or null with the
+// ordinal-sorted AmbiguousCandidates that tied at the winning tier (empty when nothing matched at all).
+public readonly record struct TestProjectResolution(
+    string? TestProject,
+    IReadOnlyList<string> AmbiguousCandidates);
+
+// Model B (departure #9) test-project resolver: given an owning project (.csproj), find the ONE test project
+// whose ProjectReferences TRANSITIVELY include the owning project. Has no Java counterpart (crap4java ran ALL
+// of a resolved Maven module's tests); this is the C#-ecosystem adaptation that lets `dotnet test
+// <TestProject>` run the one test project for the analyzed code unit.
 //
 // Search is bounded to the invocation root and deterministic: enumerate .csproj under the root (anti-glob
-// EndsWith(".csproj", Ordinal)), excluding bin/obj segments (parity with departure #5), filter to the two
-// candidate names, keep those transitively referencing the owning project, ordinal-first tie-break. No match
-// => null (CliApplication.Execute fail-fasts, departure #1, exit 1). StringComparer.Ordinal throughout
+// EndsWith(".csproj", Ordinal)), excluding bin/obj segments (parity with departure #5), keep those
+// transitively referencing the owning project, then pick by tier (departure #16): (1) <Project>.Tests /
+// <Project>.UnitTests, ordinal-first; (2) marked test projects named <Project>.*; (3) any marked test
+// project. >1 at tier 2/3 => AmbiguousCandidates; no match => empty resolution (CliApplication.Execute
+// fail-fasts either way, departure #1, exit 1). StringComparer.Ordinal throughout
 // (departure #3) EXCEPT MSBuild property-NAME lookup, which is OrdinalIgnoreCase per MSBuild semantics
 // (NOT a #3 regression -- every path/value stays Ordinal); missing/unparseable referenced .csproj is
 // treated as zero references (skip, never throw).
@@ -35,9 +42,14 @@ public static partial class TestProjectResolver
     // remaining $(...) tokens stay VERBATIM -> a non-existent path -> a dropped edge (fail-safe).
     private const int MaxExpansionDepth = 64;
 
-    // Resolves <Project>.Tests.csproj OR <Project>.UnitTests.csproj (under invocationRoot) whose
-    // ProjectReferences TRANSITIVELY include owningProject. Returns the test-project .csproj path, or null.
-    public static string? ResolveTestProject(string owningProject, string invocationRoot)
+    private const string DirectoryBuildPropsFile = "Directory.Build.props";
+    private const string DirectoryBuildTargetsFile = "Directory.Build.targets";
+    private const string IsTestProjectProperty = "IsTestProject";
+    private const string TestSdkPackage = "Microsoft.NET.Test.Sdk";
+
+    // Resolves the test project (under invocationRoot) whose ProjectReferences TRANSITIVELY include
+    // owningProject, by the tiers above. Returns the one match, or the tied candidates, or neither.
+    public static TestProjectResolution ResolveTestProject(string owningProject, string invocationRoot)
     {
         ArgumentNullException.ThrowIfNull(owningProject);
         ArgumentNullException.ThrowIfNull(invocationRoot);
@@ -50,24 +62,168 @@ public static partial class TestProjectResolver
 
         if (!Directory.Exists(root))
         {
-            return null;
+            return new TestProjectResolution(null, []);
         }
 
         ResolutionContext context = new(root);
 
-        return Directory
-            .EnumerateFiles(root, "*", SearchOption.AllDirectories)
-            .Where(file => file.EndsWith(".csproj", StringComparison.Ordinal))
-            .Where(file => !HasBuildOutputSegment(file))
-            .Where(file =>
+        List<string> referencing =
+        [
+            .. Directory
+                .EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                .Where(file => file.EndsWith(".csproj", StringComparison.Ordinal))
+                .Where(file => !HasBuildOutputSegment(file))
+                .Where(candidate => ReferencesTransitively(candidate, owner, context))
+                .OrderBy(file => file, StringComparer.Ordinal)
+        ];
+
+        // Tier 1: the naming convention -- no test marker required, ordinal-first on a tie (pre-discovery
+        // behavior, unchanged).
+        string? conventional = referencing.FirstOrDefault(file =>
+        {
+            string name = Path.GetFileNameWithoutExtension(file);
+            return string.Equals(name, dotTests, StringComparison.Ordinal)
+                || string.Equals(name, dotUnitTests, StringComparison.Ordinal);
+        });
+        if (conventional is not null)
+        {
+            return new TestProjectResolution(conventional, []);
+        }
+
+        // Tier 2: marked test projects named <Project>.*; Tier 3: any marked test project. The first non-empty
+        // tier wins; >1 at that tier is AMBIGUOUS (never guessed -- the caller fail-fasts).
+        List<string> testProjects = [.. referencing.Where(file => IsTestProject(file, context))];
+        List<string> prefixed =
+        [
+            .. testProjects.Where(file =>
+                Path.GetFileNameWithoutExtension(file).StartsWith(project + ".", StringComparison.Ordinal))
+        ];
+        List<string> winningTier = prefixed.Count > 0 ? prefixed : testProjects;
+        return winningTier.Count == 1
+            ? new TestProjectResolution(winningTier[0], [])
+            : new TestProjectResolution(null, winningTier);
+    }
+
+    // A project is a test project when an UNCONDITIONED <IsTestProject>true</IsTestProject> or an
+    // UNCONDITIONED <PackageReference Include="Microsoft.NET.Test.Sdk"> appears in the .csproj, in its
+    // Directory.Build.props/.targets chain (bounded by the invocation root), or in any file those <Import>,
+    // recursively. A conditioned marker cannot be evaluated statically and is ignored (fail-safe). An <Import>'s
+    // Condition is NOT evaluated: the import is followed iff its expanded path exists at or under the root.
+    // Visited set => an import cycle terminates. Missing/malformed files contribute nothing (never throw).
+    private static bool IsTestProject(string projectFile, ResolutionContext context)
+    {
+        XDocument? projectDoc = TryLoadDocument(projectFile);
+        if (projectDoc is null)
+        {
+            return false;
+        }
+
+        Dictionary<string, string> properties = ResolvePropertyMap(projectFile, projectDoc, context);
+        HashSet<string> visited = new(StringComparer.Ordinal);
+        Stack<string> pending = new(
+            DirectoryBuildChain(projectFile, context.Root, DirectoryBuildPropsFile)
+                .Concat(DirectoryBuildChain(projectFile, context.Root, DirectoryBuildTargetsFile))
+                .Append(projectFile));
+
+        while (pending.Count > 0)
+        {
+            string file = pending.Pop();
+            if (!visited.Add(file))
             {
-                string name = Path.GetFileNameWithoutExtension(file);
-                return string.Equals(name, dotTests, StringComparison.Ordinal)
-                    || string.Equals(name, dotUnitTests, StringComparison.Ordinal);
-            })
-            .Where(candidate => ReferencesTransitively(candidate, owner, context))
-            .OrderBy(file => file, StringComparer.Ordinal)
-            .FirstOrDefault();
+                continue;
+            }
+
+            XDocument? doc = string.Equals(file, projectFile, StringComparison.Ordinal)
+                ? projectDoc
+                : TryLoadDocument(file);
+            if (doc?.Root is null)
+            {
+                continue;
+            }
+
+            if (HasTestMarker(doc.Root))
+            {
+                return true;
+            }
+
+            foreach (string import in ImportedFiles(file, doc.Root, projectFile, properties, context.Root))
+            {
+                pending.Push(import);
+            }
+        }
+
+        return false;
+    }
+
+    // Property NAME compares OrdinalIgnoreCase (MSBuild semantics) and the package id OrdinalIgnoreCase (NuGet
+    // ids are case-insensitive); element names stay Ordinal like the rest of this resolver.
+    private static bool HasTestMarker(XElement project)
+    {
+        foreach (XElement group in project.Elements().Where(IsUnconditioned))
+        {
+            bool marked = group.Name.LocalName switch
+            {
+                "PropertyGroup" => group.Elements().Where(IsUnconditioned).Any(property =>
+                    string.Equals(property.Name.LocalName, IsTestProjectProperty, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(property.Value.Trim(), "true", StringComparison.OrdinalIgnoreCase)),
+                "ItemGroup" => group.Elements().Where(IsUnconditioned).Any(item =>
+                    string.Equals(item.Name.LocalName, "PackageReference", StringComparison.Ordinal)
+                    && string.Equals((string?)item.Attribute("Include"), TestSdkPackage, StringComparison.OrdinalIgnoreCase)),
+                _ => false,
+            };
+            if (marked)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsUnconditioned(XElement element) => element.Attribute("Condition") is null;
+
+    // <Import Project="..."> targets of importingFile, expanded over N's property map with the intrinsics
+    // re-scoped to importingFile (so $(MSBuildThisFileDirectory) means the IMPORTING file's dir), resolved
+    // relative to importingFile, kept only when the file exists at or under the invocation root.
+    private static IEnumerable<string> ImportedFiles(
+        string importingFile,
+        XElement project,
+        string projectFile,
+        Dictionary<string, string> properties,
+        string root)
+    {
+        Dictionary<string, string> scoped = new(properties, StringComparer.OrdinalIgnoreCase);
+        foreach (KeyValuePair<string, string> intrinsic in IntrinsicProperties(importingFile, projectFile))
+        {
+            scoped[intrinsic.Key] = intrinsic.Value;
+        }
+
+        string dir = Path.GetDirectoryName(importingFile)!;
+        return project.Descendants()
+            .Where(e => string.Equals(e.Name.LocalName, "Import", StringComparison.Ordinal))
+            .Select(e => (string?)e.Attribute("Project"))
+            .Where(path => !string.IsNullOrEmpty(path))
+            .Select(path => Path.GetFullPath(Path.Combine(dir, ExpandInclude(path!, scoped).Replace('\\', '/'))))
+            .Where(path => IsAtOrUnder(path, root) && File.Exists(path));
+    }
+
+    // Loads an MSBuild XML file, or null when it is missing or malformed (the resolver's non-throwing probe
+    // discipline). XmlException ONLY (CA1031-clean); FS faults propagate to the T20 catch-all.
+    private static XDocument? TryLoadDocument(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            return XDocument.Load(path);
+        }
+        catch (XmlException)
+        {
+            return null;
+        }
     }
 
     // Cycle-safe transitive ProjectReference reachability from fromProject to targetProject. Both paths are
@@ -173,7 +329,7 @@ public static partial class TestProjectResolver
         Dictionary<string, string> rawValues = new(StringComparer.OrdinalIgnoreCase);
         Dictionary<string, string> definingFiles = new(StringComparer.OrdinalIgnoreCase);
 
-        foreach (string propsFile in DirectoryBuildPropsChain(projectFile, context.Root))
+        foreach (string propsFile in DirectoryBuildChain(projectFile, context.Root, DirectoryBuildPropsFile))
         {
             CollectDefinitions(propsFile, LoadPropertyGroups(propsFile), rawValues, definingFiles);
         }
@@ -204,17 +360,18 @@ public static partial class TestProjectResolver
         return resolved;
     }
 
-    // The Directory.Build.props chain for N: every such file from N's own directory up to (and INCLUDING)
-    // the invocation root, ordered outermost (root) -> nearest. BOUNDED -- it never climbs above the root
-    // (a props file above the root is a documented fail-safe residual), so it never reaches the drive root.
-    // Fixed filename + File.Exists (no glob) => deterministic, no enumeration-order ambiguity.
-    private static List<string> DirectoryBuildPropsChain(string projectFile, string root)
+    // The Directory.Build.props (or .targets, per fileName) chain for N: every such file from N's own
+    // directory up to (and INCLUDING) the invocation root, ordered outermost (root) -> nearest. BOUNDED -- it
+    // never climbs above the root (a file above the root is a documented fail-safe residual), so it never
+    // reaches the drive root. Fixed filename + File.Exists (no glob) => deterministic, no enumeration-order
+    // ambiguity.
+    private static List<string> DirectoryBuildChain(string projectFile, string root, string fileName)
     {
         List<string> chain = [];
         string? current = Path.GetDirectoryName(projectFile);
         while (current is not null && IsAtOrUnder(current, root))
         {
-            string candidate = Path.Combine(current, "Directory.Build.props");
+            string candidate = Path.Combine(current, fileName);
             if (File.Exists(candidate))
             {
                 chain.Add(candidate);

@@ -30,14 +30,24 @@ Each invocation resolves the code unit under analysis and the test project that 
 1. **Owning project** — the nearest `.csproj` **at or above** the analyzed C# files. `.sln` is not a
    marker; the owning unit is a `.csproj`. All analyzed files must resolve to a **single** owning project
    (one owning project per run).
-2. **Test project** — `<Project>.Tests.csproj` **or** `<Project>.UnitTests.csproj` whose
-   `ProjectReference`s **transitively** include the owning project. crap4csharp runs **only** that test
-   project, and only its **unit tests** (see *Unit-test determination* below).
-3. **Fail fast (exit 1)** when there is **no owning `.csproj`**, the analyzed files **span multiple
-   projects**, or there is **no matching test project** — each with a greppable stderr message.
+2. **Test project** — a `.csproj` whose `ProjectReference`s **transitively** include the owning
+   project, chosen by tier (the first tier with a match wins):
+   1. `<Project>.Tests.csproj` or `<Project>.UnitTests.csproj`;
+   2. a *test project* named `<Project>.*` (e.g. `Foo.BlackBoxTests`, `Foo.Specs`);
+   3. any other *test project*.
 
-**Baseline requirements:** the target follows the `<Project>.Tests`/`.UnitTests` naming convention, the
-test project references `coverlet.collector`, and a run targets one owning project.
+   A *test project* sets `<IsTestProject>true</IsTestProject>` or references `Microsoft.NET.Test.Sdk`
+   (unconditioned), in the `.csproj` itself, a `Directory.Build.props`/`.targets`, or a file it
+   `<Import>`s. crap4csharp runs **only** that test project, and only its **unit tests** (see *Unit-test
+   determination* below).
+3. **Fail fast (exit 1)** when there is **no owning `.csproj`**, the analyzed files **span multiple
+   projects**, there is **no test project**, or **multiple test projects** tie at tier 2 or 3 — each with
+   a greppable stderr message.
+
+**Baseline requirements:** the target has a test project that references the owning project and
+`coverlet.collector`, and a run targets one owning project. Blackbox tests work as long as they host the
+app **in-process** (e.g. `WebApplicationFactory<Program>`, or calling the entry point) — Coverlet cannot
+see an app launched as a separate process.
 
 ### Unit-test determination (on an analyzed target)
 
@@ -126,7 +136,7 @@ dotnet run --project src/Crap4CSharp -c Release -- project-a project-b
 
 - `0` success, threshold respected
 - `1` invalid CLI usage, or a fatal error — no owning `.csproj`, files span multiple projects, no
-  matching test project, no tests ran, or no coverage produced (see *Module & Test Resolution* / Notes)
+  test project or multiple equally-ranked test projects, no tests ran, or no coverage produced (see *Module & Test Resolution* / Notes)
 - `2` CRAP threshold exceeded (`> 8.0`)
 
 ## Notes
@@ -135,7 +145,7 @@ dotnet run --project src/Crap4CSharp -c Release -- project-a project-b
   rather than continuing — a deliberate, stricter departure from `crap4java`. A member simply absent
   from an otherwise-populated report is still reported as `N/A`.
 - **One owning project, one report:** crap4csharp resolves a single owning `.csproj` and its single
-  `<Project>.Tests`/`.UnitTests` project, so `dotnet test --collect` emits **exactly one**
+  test project, so `dotnet test --collect` emits **exactly one**
   `coverage.cobertura.xml` — no multi-report ambiguity. If the analyzed files span more than one owning
   project, crap4csharp **fails fast** (exit 1) rather than silently under-reporting; narrow the run to a
   single project.

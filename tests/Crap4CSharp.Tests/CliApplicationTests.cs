@@ -212,7 +212,7 @@ public class CliApplicationTests
 
             string? owning = OwningProjectResolver.ResolveOwningProject(source, root);
             owning.Should().NotBeNull();
-            string? expectedTestProject = TestProjectResolver.ResolveTestProject(owning!, root);
+            string? expectedTestProject = TestProjectResolver.ResolveTestProject(owning!, root).TestProject;
             expectedTestProject.Should().NotBeNull();
 
             fake.Directories.Should().ContainSingle();
@@ -459,6 +459,65 @@ public class CliApplicationTests
             exit.Should().Be(1);
             error.ToString().Should().Contain("No test project");
             fake.Directories.Should().BeEmpty();
+        });
+    }
+
+    // Test-project discovery fail-fast: two marked, non-conventionally-named test projects both reference the
+    // owner at the same tier -> exit 1, stderr anchor naming both; the runner is NEVER invoked.
+    [Fact]
+    public void FailsFastWhenMultipleTestProjectsQualify()
+    {
+        WithTempRoot(root =>
+        {
+            string srcDir = Path.Combine(root, "src", "Foo");
+            Directory.CreateDirectory(srcDir);
+            File.WriteAllText(Path.Combine(srcDir, "Foo.csproj"), MinimalProject());
+            string source = Path.Combine(srcDir, "Sample.cs");
+            File.WriteAllText(source, AlphaSampleSource);
+            const string marker = "<PropertyGroup><IsTestProject>true</IsTestProject></PropertyGroup>";
+            const string reference = @"<ItemGroup><ProjectReference Include=""..\..\src\Foo\Foo.csproj"" /></ItemGroup>";
+            WriteFile(root, "tests/Foo.Specs/Foo.Specs.csproj", $"<Project>{marker}{reference}</Project>");
+            WriteFile(root, "tests/Foo.BlackBoxTests/Foo.BlackBoxTests.csproj", $"<Project>{marker}{reference}</Project>");
+            using StringWriter output = new();
+            using StringWriter error = new();
+            FakeExecutor fake = new(0, Alpha75Xml);
+            CliApplication app = new(root, output, error, new CoverageRunner(fake));
+
+            int exit = app.Execute([source]);
+
+            exit.Should().Be(1);
+            error.ToString().Should().Contain("Multiple test projects")
+                .And.Contain("Foo.Specs.csproj")
+                .And.Contain("Foo.BlackBoxTests.csproj");
+            fake.Directories.Should().BeEmpty();
+        });
+    }
+
+    // Test-project discovery: a marked blackbox project that is not named <Project>.Tests/.UnitTests is
+    // resolved and handed to the coverage run.
+    [Fact]
+    public void RunsCoverageAgainstDiscoveredTestProject()
+    {
+        WithTempRoot(root =>
+        {
+            string srcDir = Path.Combine(root, "src", "Foo");
+            Directory.CreateDirectory(srcDir);
+            File.WriteAllText(Path.Combine(srcDir, "Foo.csproj"), MinimalProject());
+            string source = Path.Combine(srcDir, "Sample.cs");
+            File.WriteAllText(source, AlphaSampleSource);
+            string testProject = WriteFile(
+                root,
+                "tests/Foo.BlackBoxTests/Foo.BlackBoxTests.csproj",
+                @"<Project><PropertyGroup><IsTestProject>true</IsTestProject></PropertyGroup><ItemGroup><ProjectReference Include=""..\..\src\Foo\Foo.csproj"" /></ItemGroup></Project>");
+            using StringWriter output = new();
+            using StringWriter error = new();
+            FakeExecutor fake = new(0, Alpha75Xml);
+            CliApplication app = new(root, output, error, new CoverageRunner(fake));
+
+            int exit = app.Execute([source]);
+
+            exit.Should().Be(0);
+            fake.Commands.Should().ContainSingle().Which.Should().Contain(testProject);
         });
     }
 

@@ -43,7 +43,7 @@ public sealed class CliApplication
     }
 
     // Ports execute(String[]). Owns every exit code (§4): 0 (help / no files / max CRAP <= 8.0),
-    // 1 (parse error / no owning project / files span multiple projects / no test project / no report /
+    // 1 (parse error / no owning project / files span multiple projects / no test project / multiple test projects / no report /
     // multiple reports / empty report), 2 (threshold exceeded). The coverage-runner throw and any parser throw
     // PROPAGATE (faithful to Java's `throws Exception`); T15's Program.Main converts them to exit 1.
     public int Execute(string[] args)
@@ -85,11 +85,18 @@ public sealed class CliApplication
         }
 
         string owningProject = owningProjects[0];
-        string? testProject = TestProjectResolver.ResolveTestProject(owningProject, _projectRoot);
+        TestProjectResolution testResolution = TestProjectResolver.ResolveTestProject(owningProject, _projectRoot);
+        if (testResolution.AmbiguousCandidates.Count > 0)
+        {
+            _error.WriteLine($"Multiple test projects transitively reference '{owningProject}' at the same priority ({string.Join(", ", testResolution.AmbiguousCandidates)}); crap4csharp runs a single test project per run. Rename the intended one to {Path.GetFileNameWithoutExtension(owningProject)}.Tests or narrow the invocation root.");
+            return 1;
+        }
+
+        string? testProject = testResolution.TestProject;
         if (testProject is null)
         {
             string project = Path.GetFileNameWithoutExtension(owningProject);
-            _error.WriteLine($"No test project was found for '{owningProject}' (expected {project}.Tests.csproj or {project}.UnitTests.csproj transitively referencing it, under '{_projectRoot}').");
+            _error.WriteLine($"No test project was found for '{owningProject}' (expected {project}.Tests.csproj or {project}.UnitTests.csproj, or a test project marked IsTestProject / referencing Microsoft.NET.Test.Sdk, transitively referencing it, under '{_projectRoot}').");
             return 1;
         }
 
